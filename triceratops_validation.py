@@ -722,6 +722,11 @@ class Config:
     # (closer than di_edge_px to the boundary: a fit run off on noise).
     di_min_lc_snr: float = 3.0
     di_edge_px: float = 1.0
+    # A sector counts for or against a neighbour only if it can tell that
+    # star from the target: centroid error < di_resolve_frac x their
+    # separation.  A sector that cannot resolve the pair neither keeps the
+    # star in nor excludes it (open issue 9, Steve Price).
+    di_resolve_frac: float = 1.0 / 3.0
     # Systematic floor added in quadrature to the difference-image centroid
     # error (Gaussian approximation of the TESS PRF, pointing): without it a
     # 0.007 px statistical error turns a 1-2" PRF-model offset into 5-13 sigma.
@@ -5175,6 +5180,9 @@ def difference_image_analysis(sectors_data, stars, P, T0, dur, cfg: Config,
                 d_pix = float(np.hypot(xs_star[i] - fit_diff["x"],
                                        ys_star[i] - fit_diff["y"]))
                 nsig = d_pix / sig_pix
+                sep_pix = float(row["sep (arcsec)"]) / scale if scale > 0 else np.nan
+                resolves = bool(i != 0 and np.isfinite(sep_pix) and sep_pix > 0
+                                and sig_pix < cfg.di_resolve_frac * sep_pix)
                 star_rows.append(dict(
                     sector=sd.sector, ID=int(row["ID"]),
                     is_target=(i == 0),
@@ -5183,6 +5191,7 @@ def difference_image_analysis(sectors_data, stars, P, T0, dur, cfg: Config,
                     dist_from_centroid_arcsec=d_pix * scale,
                     n_sigma=nsig,
                     excluded=bool(nsig > cfg.di_sigma and i != 0),
+                    sigma_pix=sig_pix, resolves=resolves,
                 ))
 
         # --- plot ---
@@ -5237,12 +5246,23 @@ def _plot_difference_image(sd, di, fit_diff, fit_dir, stars, cfg, tic):
 
 
 def combine_difference_imaging(star_table, cfg: Config):
-    """Stars excluded in *every* sector where the centroid was measurable."""
+    """Stars excluded in *every* sector that can resolve them from the target.
+
+    A sector resolves a star when its centroid error is smaller than
+    cfg.di_resolve_frac (1/3) of the star's separation from the target.
+    Only those sectors count: a star is dropped when at least one sector
+    resolves it and all resolving sectors exclude it.  A weak sector with a
+    large centroid error can no longer keep a well-separated neighbour in
+    against sectors that exclude it, and cannot exclude a close one either.
+    Tables without the 'resolves' column (older runs) use every sector."""
     if star_table is None or len(star_table) == 0:
         return []
     drop = []
-    for sid, grp in star_table[~star_table["is_target"]].groupby("ID"):
-        if len(grp) and bool(grp["excluded"].all()):
+    use_res = "resolves" in star_table.columns
+    for sid, grp in star_table[~star_table["is_target"].astype(bool)].groupby("ID"):
+        if use_res:
+            grp = grp[grp["resolves"].astype(bool)]
+        if len(grp) and bool(grp["excluded"].astype(bool).all()):
             drop.append(int(sid))
     return drop
 
@@ -9340,6 +9360,14 @@ def main(cfg: Config):
             di_drop = combine_difference_imaging(di_stars, cfg)
             _log(log, f"  stars excluded by difference imaging: {len(di_drop)}"
                       + (f" (first: {sorted(di_drop)[:8]})" if di_drop else ""))
+            if "resolves" in di_stars:
+                _nb = di_stars[~di_stars["is_target"].astype(bool)]
+                _res = _nb.groupby("ID")["resolves"].any()
+                _log(log, f"  (a sector counts for a star only if its centroid error "
+                          f"< {cfg.di_resolve_frac:.2g} x the star's separation from "
+                          f"the target; {int((~_res).sum())} of {len(_res)} stars "
+                          f"are not resolved by any sector)")
+                _summary(cfg)["di_stars_unresolved"] = int((~_res).sum())
             drop_stars.update(di_drop)
 
     # ---- 8b. vetting from the neighbours' own light curves ---------------

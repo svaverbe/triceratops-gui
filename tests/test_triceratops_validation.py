@@ -836,3 +836,23 @@ def test_sectors_with_too_few_cadences_are_dropped(tmp_path):
     text = logf.read_text()
     assert "sector 90: only 0 usable cadences" in text
     assert "sector 91: only 20 usable cadences" in text
+
+
+def test_combine_di_counts_only_sectors_that_resolve_the_star():
+    """Open issue 9: a weak sector (large centroid error) can neither keep a
+    neighbour in nor exclude it; only sectors that resolve it count."""
+    import pandas as pd
+    cfg = tv.Config(tic=1)
+    rows = []
+    # star 2 at 60": two good sectors exclude it, one noisy sector does not
+    for sec, exc, res in [(1, True, True), (2, True, True), (3, False, False)]:
+        rows.append(dict(sector=sec, ID=2, is_target=False, excluded=exc, resolves=res))
+    # star 3: only an unresolving sector -> never dropped
+    rows.append(dict(sector=1, ID=3, is_target=False, excluded=False, resolves=False))
+    # star 4: a resolving sector keeps it in
+    rows += [dict(sector=1, ID=4, is_target=False, excluded=True, resolves=True),
+             dict(sector=2, ID=4, is_target=False, excluded=False, resolves=True)]
+    tab = pd.DataFrame(rows)
+    assert tv.combine_difference_imaging(tab, cfg) == [2]
+    # older tables without 'resolves': every sector counts
+    assert tv.combine_difference_imaging(tab.drop(columns="resolves"), cfg) == []
